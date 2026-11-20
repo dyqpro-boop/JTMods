@@ -1,1 +1,45 @@
+name: Build HNMod
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          swift --version
+          xcode-select -p
+
+      - name: Resolve package
+        run: |
+          swift package resolve
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -scheme HNMod \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            -derivedDataPath build \
+            build
+
+      - name: Find products
+        run: |
+          find build -type f | sort
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: HNMod-iOS
+          path: build/
