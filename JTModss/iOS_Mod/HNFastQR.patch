@@ -1,0 +1,1199 @@
+diff --git a/iOS_Mod/HNFastQRPaymentViewController.swift b/iOS_Mod/HNFastQRPaymentViewController.swift
+index c73bb07..1ed2c4c 100644
+--- a/iOS_Mod/HNFastQRPaymentViewController.swift
++++ b/iOS_Mod/HNFastQRPaymentViewController.swift
+@@ -1,21 +1,9 @@
+ //
+ //  HNFastQRPaymentViewController.swift
+-//  iOS_Mod - TTFast QR Payment Screen
++//  iOS_Mod - Fast COD transfer screen
+ //
+-//  Updated: builds a correct VietQR deep link (app + ba + am + tn + bn) so
+-//  tapping "Mở App Ngân Hàng" lands directly on a pre-filled transfer screen
+-//  instead of just opening the banking app. Bank codes are fetched from the
+-//  official VietQR bank list API (https://api.vietqr.io/v2/banks) instead of
+-//  guessed, and the J&T QR payload is parsed (EMVCo/napas247 TLV) to recover
+-//  the real beneficiary account, bank, amount, content AND name.
+-//
+-//  2026-10-17: added `bn=` (beneficiary name), per vietqr.io/changelog —
+-//  this field was added 2025-10-31 (v2.15), and BIDV (2026-01-09, v2.16) and
+-//  MB (2026-07-31, v2.18) autofill were both enabled only AFTER that. Every
+-//  link built before this fix was missing `bn=`; that may be exactly why
+-//  `UIApplication.open` kept reporting success (the app opened) while
+-//  nothing was ever prefilled across BIDV/MB/VCB, on both the J&T virtual
+-//  account and a real personal account. Still needs on-device retest.
++//  Parses the original J&T EMV/VietQR payload and opens an autofill-capable
++//  bank app through the official VietQR deeplink.
+ //
+ 
+ import UIKit
+@@ -81,23 +69,6 @@ struct VietQRApp: Decodable {
+         }
+     }
+ 
+-    /// Device-tested 2026-10-17: BIDV, Vietcombank AND MB (3/3 tried,
+-    /// including two the API itself flags `autofill=1`) all failed to
+-    /// prefill the transfer via `dl.vietqr.io/pay` when paying into the
+-    /// J&T virtual/merchant collection account (`VJTP...`) — every bank
+-    /// just opened to its home/login screen, even after a successful
+-    /// Face ID login. Since it failed identically across banks rather than
+-    /// only on one, the API's per-bank `autofill` flag can no longer be
+-    /// trusted to predict real behavior for this account type. The badge is
+-    /// disabled globally here until a bank is reconfirmed to actually work
+-    /// (most likely once tested against a real personal account via the
+-    /// "QR STK Shipper" mode rather than the J&T virtual sub-account).
+-    static var autofillBadgeGloballyEnabled = false
+-
+-    /// Whether to actually show the "⚡ Tự động điền" badge.
+-    var showsAutofillBadge: Bool {
+-        VietQRApp.autofillBadgeGloballyEnabled && autofill == 1
+-    }
+ }
+ 
+ struct VietQRAppResponse: Decodable {
+@@ -113,22 +84,13 @@ final class VietQRBankDirectory {
+     private(set) var banks: [VietQRBank] = []
+     private var isLoading = false
+     private var pendingCompletions: [() -> Void] = []
+-    private var loadedFromNetwork = false
+-    private var appsLoadedFromNetwork = false
+ 
+     private let fallbackApps: [VietQRApp] = [
+         VietQRApp(appId: "icb", appLogo: nil, appName: "VietinBank iPay", bankName: "Ngân hàng TMCP Công thương Việt Nam", monthlyInstall: 200000, deeplink: "https://dl.vietqr.io/pay?app=icb", autofill: 1),
+         VietQRApp(appId: "bidv", appLogo: nil, appName: "BIDV SmartBanking", bankName: "Ngân hàng TMCP Đầu tư và Phát triển Việt Nam", monthlyInstall: 100000, deeplink: "https://dl.vietqr.io/pay?app=bidv", autofill: 1),
+         VietQRApp(appId: "acb", appLogo: nil, appName: "ACB ONE", bankName: "Ngân hàng TMCP Á Châu", monthlyInstall: 60000, deeplink: "https://dl.vietqr.io/pay?app=acb", autofill: 1),
+         VietQRApp(appId: "ocb", appLogo: nil, appName: "OCB OMNI", bankName: "Ngân hàng TMCP Phương Đông", monthlyInstall: 60000, deeplink: "https://dl.vietqr.io/pay?app=ocb", autofill: 1),
+-        VietQRApp(appId: "mb", appLogo: nil, appName: "MB Bank", bankName: "Ngân hàng TMCP Quân đội", monthlyInstall: 400000, deeplink: "https://dl.vietqr.io/pay?app=mb", autofill: 1),
+-        VietQRApp(appId: "vcb", appLogo: nil, appName: "VCB Digibank", bankName: "Ngân hàng TMCP Ngoại Thương Việt Nam", monthlyInstall: 200000, deeplink: "https://dl.vietqr.io/pay?app=vcb", autofill: 0),
+-        VietQRApp(appId: "tcb", appLogo: nil, appName: "Techcombank Mobile", bankName: "Ngân hàng TMCP Kỹ thương Việt Nam", monthlyInstall: 300000, deeplink: "https://dl.vietqr.io/pay?app=tcb", autofill: 0),
+-        VietQRApp(appId: "vpb", appLogo: nil, appName: "VPBank NEO", bankName: "Ngân hàng TMCP Việt Nam Thịnh Vượng", monthlyInstall: 200000, deeplink: "https://dl.vietqr.io/pay?app=vpb", autofill: 0),
+-        VietQRApp(appId: "vib-2", appLogo: nil, appName: "MyVIB", bankName: "Ngân hàng TMCP Quốc tế Việt Nam", monthlyInstall: 40000, deeplink: "https://dl.vietqr.io/pay?app=vib-2", autofill: 0),
+-        VietQRApp(appId: "shb", appLogo: nil, appName: "SHB Mobile", bankName: "Ngân hàng TMCP Sài Gòn - Hà Nội", monthlyInstall: nil, deeplink: "https://dl.vietqr.io/pay?app=shb", autofill: 0),
+-        VietQRApp(appId: "lpb", appLogo: nil, appName: "LPBank", bankName: "Ngân hàng TMCP Lộc Phát Việt Nam", monthlyInstall: nil, deeplink: "https://dl.vietqr.io/pay?app=lpb", autofill: 0),
+-        VietQRApp(appId: "seab", appLogo: nil, appName: "SeABank", bankName: "Ngân hàng TMCP Đông Nam Á", monthlyInstall: nil, deeplink: "https://dl.vietqr.io/pay?app=seab", autofill: 0)
++        VietQRApp(appId: "mb", appLogo: nil, appName: "MB Bank", bankName: "Ngân hàng TMCP Quân đội", monthlyInstall: 400000, deeplink: "https://dl.vietqr.io/pay?app=mb", autofill: 1)
+     ]
+ 
+     fileprivate static let appsCacheKey = "HNVietQRAppsCache.v1"
+@@ -140,9 +102,8 @@ final class VietQRBankDirectory {
+         // list never has to wait on api.vietqr.io before the app can open.
+         let d = UserDefaults.standard
+         if let data = d.data(forKey: VietQRBankDirectory.appsCacheKey),
+-           let decoded = try? JSONDecoder().decode(VietQRAppResponse.self, from: data),
+-           !decoded.apps.isEmpty {
+-            apps = decoded.apps
++           let decoded = try? JSONDecoder().decode(VietQRAppResponse.self, from: data) {
++            apps = decoded.apps.filter { $0.autofill == 1 }
+         }
+         if let data = d.data(forKey: VietQRBankDirectory.banksCacheKey),
+            let decoded = try? JSONDecoder().decode(VietQRBankResponse.self, from: data),
+@@ -152,10 +113,6 @@ final class VietQRBankDirectory {
+     }
+ 
+     func ensureLoaded(completion: @escaping () -> Void) {
+-        if loadedFromNetwork {
+-            completion()
+-            return
+-        }
+         pendingCompletions.append(completion)
+         guard !isLoading else { return }
+         isLoading = true
+@@ -175,16 +132,15 @@ final class VietQRBankDirectory {
+                     group.leave()
+                     return
+                 }
+-                guard let decoded = try? JSONDecoder().decode(VietQRAppResponse.self, from: data),
+-                      !decoded.apps.isEmpty else {
++                guard let decoded = try? JSONDecoder().decode(VietQRAppResponse.self, from: data) else {
+                     HNLog.write("[VietQR] iOS app directory response was invalid or empty.")
+                     group.leave()
+                     return
+                 }
+                 DispatchQueue.main.async {
+-                    self.apps = decoded.apps
+-                    self.appsLoadedFromNetwork = true
++                    self.apps = decoded.apps.filter { $0.autofill == 1 }
+                     UserDefaults.standard.set(data, forKey: VietQRBankDirectory.appsCacheKey)
++                    HNLog.write("[VietQR] filtered autofill apps=\(self.apps.map { $0.appId })")
+                     group.leave()
+                 }
+             }.resume()
+@@ -224,8 +180,7 @@ final class VietQRBankDirectory {
+         group.notify(queue: .main) { [weak self] in
+             guard let self = self else { return }
+             self.isLoading = false
+-            self.loadedFromNetwork = self.appsLoadedFromNetwork
+-            HNLog.write("[VietQR] directory loaded. fromNetwork=\(self.loadedFromNetwork) apps=\(self.apps.count) banks=\(self.banks.count) appIds=\(self.apps.map { $0.appId })")
++            HNLog.write("[VietQR] directory refreshed. apps=\(self.apps.count) banks=\(self.banks.count) appIds=\(self.apps.map { $0.appId })")
+             self.flushCompletions()
+         }
+     }
+@@ -371,11 +326,10 @@ enum EMVQRParser {
+     }
+ }
+ 
+-// MARK: - Local VietQR (napas247) builder — exact amount, built on-device
++// MARK: - Shared VietQR payload utilities
+ 
+-/// Builds a standard VietQR / napas247 payload (EMVCo TLV + CRC16) for the
+-/// shipper's OWN account, with the amount written as an exact integer VND
+-/// in tag 54 (no rounding, no network call, no third-party image service).
++/// Shared by other J&T messaging flows; the Fast COD screen uses the original
++/// payload parser above and does not build a replacement QR.
+ enum HNVietQRBuilder {
+ 
+     /// Parses "190,000đ", "190.000", "190000", "190000.00" … into whole VND.
+@@ -625,25 +579,10 @@ enum HNVietQRBuilder {
+ 
+ enum HNQRPrefs {
+     static let lastBankKey = "HNLastPaidBankApp"
+-}
+-
+-/// Optional per-app custom URL schemes for banking apps that are NOT in the
+-/// official vietqr.io deeplink list (e.g. Vikki). Fill in after reading the
+-/// app's Info.plist -> CFBundleURLTypes -> CFBundleURLSchemes, e.g.
+-///   "vikki": "<scheme>://vietqr"
+-enum HNBankSchemeOverrides {
+-    static var schemes: [String: String] = [:]
++    static let lastOpenDateKey = "HNLastVietQROpenDate"
+ }
+ 
+ enum HNVietQRBankCodes {
+-    /// The 12 apps listed at https://www.vietqr.io/deeplink/bank-apps .
+-    /// Autofill is only offered for icb / bidv / ocb / acb / mb; the others
+-    /// just open the app.
+-    static let officialDeepLinkApps: Set<String> = [
+-        "icb", "bidv", "ocb", "acb", "mb",
+-        "vcb", "tcb", "vpb", "vib-2", "shb", "lpb", "seab"
+-    ]
+-
+     /// `url` is documented as required by dl.vietqr.io (return link after a
+     /// successful payment). Swap for your own URL scheme if you have one.
+     static let defaultReturnURL = "https://jtexpress.vn"
+@@ -656,14 +595,14 @@ enum HNVietQRBankCodes {
+         "970431": "eib", "970405": "vba", "963311": "vikki"
+     ]
+ 
+-    /// `ba=` is documented as <account>@<bank CODE> (e.g. 113366668888@vcb), not the 6-digit BIN.
+-    /// BIN (digits) -> bank code. Prefers the live `/v2/banks` list, then the
+-    /// static table; already-textual codes pass through lowercased.
++    /// `ba=` uses <account>@<bank code>, not the 6-digit BIN.
++    /// Numeric BINs resolve through `/v2/banks` first and the static map second.
+     static func deepLinkRef(for raw: String?) -> String? {
+         guard let raw = raw, !raw.isEmpty else { return nil }
+-        guard raw.allSatisfy({ $0.isNumber }) else { return raw.lowercased() }
+-        if let b = VietQRBankDirectory.shared.banks.first(where: { $0.bin == raw }) {
+-            let code = b.code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
++        let isNumericBIN = raw.utf8.allSatisfy { $0 >= 48 && $0 <= 57 }
++        guard isNumericBIN else { return raw.lowercased() }
++        if let bank = VietQRBankDirectory.shared.banks.first(where: { $0.bin == raw }) {
++            let code = bank.code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+             return code.isEmpty ? nil : code
+         }
+         return staticBinToCode[raw]
+@@ -682,49 +621,37 @@ public class HNFastQRPaymentViewController: UIViewController {
+ 
+     private let scrollView = UIScrollView()
+     private let contentView = UIView()
+-
+-    private let segmentedControl = UISegmentedControl(items: ["QR J&T (Tự gạch nợ)", "QR STK Shipper"])
+-
+     private let cardView = UIView()
+     private let headerLogoLabel = UILabel()
+-    private let qrImageView = UIImageView()
+     private let timerLabel = UILabel()
+-    private let amountLabel = UILabel()
+-
+     private let infoStackView = UIStackView()
+-
+-    private let openBankButton = UIButton(type: .system)
+-    private let shareButton = UIButton(type: .system)
+-    private let saveButton = UIButton(type: .system)
++    private let bankSectionLabel = UILabel()
++    private let bankGridStackView = UIStackView()
+     private let backButton = UIButton(type: .system)
+ 
+     private var countdownTimer: Timer?
+     private var expireDate: Date?
++    private var beneficiary: BeneficiaryInfo?
++    private var bankApps: [VietQRApp] = []
+ 
+-    private var currentPayload: String = ""
+-
+-    /// Resolved, ready-to-use beneficiary info for building the VietQR deep
+-    /// link. Recomputed every time `renderCurrentSegment()` runs.
+     private struct BeneficiaryInfo {
+-        var account: String
+-        var bankCode: String?   // VietQR bank `code` for the beneficiary; nil if unresolved
+-        var bankLabel: String   // display only
+-        var amount: Int
+-        var content: String
+-        var beneficiaryName: String  // sent as `bn=` — some banks (BIDV, MB per
+-                                      // changelog) appear to require this to
+-                                      // autofill at all, added to the deeplink
+-                                      // API in VietQR changelog 2.15 (2025-10-31)
++        let account: String
++        let bankBIN: String
++        let amount: String
++        let content: String
++        let beneficiaryName: String
+     }
+-    private var beneficiary: BeneficiaryInfo?
+ 
+     override public func viewDidLoad() {
+         super.viewDidLoad()
+-        HNLog.write("[VietQR] ===== HNFastQRPaymentViewController opened ===== waybillNo=\(waybillNo) amountText=\(amountText) receiverName=\(receiverName) payData.payload.isEmpty=\(payData?.payload.isEmpty ?? true) payData.customerCode=\(payData?.customerCode ?? "nil") payData.totalMoney=\(payData?.totalMoney ?? -1)")
++        HNLog.write("[VietQR] Fast COD transfer screen opened. waybillNo=\(waybillNo)")
+         setupUI()
+         populateData()
++        renderBankButtons()
+         startCountdown()
+-        VietQRBankDirectory.shared.ensureLoaded { }
++        VietQRBankDirectory.shared.ensureLoaded { [weak self] in
++            self?.renderBankButtons()
++        }
+     }
+ 
+     override public func viewWillDisappear(_ animated: Bool) {
+@@ -735,8 +662,6 @@ public class HNFastQRPaymentViewController: UIViewController {
+ 
+     private func setupUI() {
+         view.backgroundColor = UIColor(red: 0.96, green: 0.96, blue: 0.98, alpha: 1.0)
+-
+-        // ScrollView & ContentView
+         scrollView.translatesAutoresizingMaskIntoConstraints = false
+         contentView.translatesAutoresizingMaskIntoConstraints = false
+         view.addSubview(scrollView)
+@@ -747,7 +672,6 @@ public class HNFastQRPaymentViewController: UIViewController {
+             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+-
+             contentView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+             contentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+             contentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+@@ -755,13 +679,12 @@ public class HNFastQRPaymentViewController: UIViewController {
+             contentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor)
+         ])
+ 
+-        // Header / Navigation Bar
+         let navView = UIView()
+         navView.translatesAutoresizingMaskIntoConstraints = false
+         contentView.addSubview(navView)
+ 
+         let titleLabel = UILabel()
+-        titleLabel.text = "Quét mã thanh toán"
++        titleLabel.text = "Chuyển khoản COD"
+         titleLabel.font = UIFont.systemFont(ofSize: 18, weight: .bold)
+         titleLabel.textColor = .label
+         titleLabel.textAlignment = .center
+@@ -769,17 +692,15 @@ public class HNFastQRPaymentViewController: UIViewController {
+         navView.addSubview(titleLabel)
+ 
+         let closeHeaderButton = UIButton(type: .system)
+-        closeHeaderButton.setTitle("✕", for: .normal)
++        closeHeaderButton.setTitle("X", for: .normal)
+         closeHeaderButton.titleLabel?.font = UIFont.systemFont(ofSize: 20, weight: .semibold)
+         closeHeaderButton.setTitleColor(.label, for: .normal)
+         closeHeaderButton.addTarget(self, action: #selector(dismissSelf), for: .touchUpInside)
+         closeHeaderButton.translatesAutoresizingMaskIntoConstraints = false
+         navView.addSubview(closeHeaderButton)
+ 
+-        // Debug log viewer — lets you inspect the exact deep link built and
+-        // whether UIApplication.open reported success, without Xcode.
+         let logButton = UIButton(type: .system)
+-        logButton.setTitle("📋 Log", for: .normal)
++        logButton.setTitle("Log", for: .normal)
+         logButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .medium)
+         logButton.setTitleColor(.secondaryLabel, for: .normal)
+         logButton.addTarget(self, action: #selector(viewLogTapped), for: .touchUpInside)
+@@ -791,33 +712,16 @@ public class HNFastQRPaymentViewController: UIViewController {
+             navView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+             navView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+             navView.heightAnchor.constraint(equalToConstant: 44),
+-
+             titleLabel.centerXAnchor.constraint(equalTo: navView.centerXAnchor),
+             titleLabel.centerYAnchor.constraint(equalTo: navView.centerYAnchor),
+-
+             logButton.leadingAnchor.constraint(equalTo: navView.leadingAnchor),
+             logButton.centerYAnchor.constraint(equalTo: navView.centerYAnchor),
+-
+             closeHeaderButton.trailingAnchor.constraint(equalTo: navView.trailingAnchor),
+             closeHeaderButton.centerYAnchor.constraint(equalTo: navView.centerYAnchor),
+             closeHeaderButton.widthAnchor.constraint(equalToConstant: 40),
+             closeHeaderButton.heightAnchor.constraint(equalToConstant: 40)
+         ])
+ 
+-        // Segmented Control (Mode Switch)
+-        segmentedControl.selectedSegmentIndex = 0
+-        segmentedControl.addTarget(self, action: #selector(segmentChanged), for: .valueChanged)
+-        segmentedControl.translatesAutoresizingMaskIntoConstraints = false
+-        contentView.addSubview(segmentedControl)
+-
+-        NSLayoutConstraint.activate([
+-            segmentedControl.topAnchor.constraint(equalTo: navView.bottomAnchor, constant: 8),
+-            segmentedControl.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+-            segmentedControl.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+-            segmentedControl.heightAnchor.constraint(equalToConstant: 36)
+-        ])
+-
+-        // Main Card View
+         cardView.backgroundColor = .white
+         cardView.layer.cornerRadius = 16
+         cardView.layer.borderWidth = 2.5
+@@ -829,131 +733,57 @@ public class HNFastQRPaymentViewController: UIViewController {
+         cardView.translatesAutoresizingMaskIntoConstraints = false
+         contentView.addSubview(cardView)
+ 
+-        // Card Header Logos
+-        headerLogoLabel.text = "J&T EXPRESS  |  Vietcombank  |  napas247  |  VietQR"
+-        headerLogoLabel.font = UIFont.systemFont(ofSize: 12, weight: .bold)
++        headerLogoLabel.text = "THÔNG TIN THU HỘ J&T"
++        headerLogoLabel.font = UIFont.systemFont(ofSize: 13, weight: .bold)
+         headerLogoLabel.textColor = UIColor(red: 0.85, green: 0.2, blue: 0.2, alpha: 1.0)
+         headerLogoLabel.textAlignment = .center
+-        headerLogoLabel.adjustsFontSizeToFitWidth = true
+-        headerLogoLabel.minimumScaleFactor = 0.7
+         headerLogoLabel.translatesAutoresizingMaskIntoConstraints = false
+         cardView.addSubview(headerLogoLabel)
+ 
+-        // QR Image View
+-        qrImageView.contentMode = .scaleAspectFit
+-        qrImageView.clipsToBounds = true
+-        qrImageView.layer.magnificationFilter = .nearest
+-        qrImageView.translatesAutoresizingMaskIntoConstraints = false
+-        cardView.addSubview(qrImageView)
+-
+-        // Timer Label
+-        timerLabel.text = "Hiệu lực trong 02:29:59"
++        timerLabel.text = ""
+         timerLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+         timerLabel.textColor = UIColor(red: 0.1, green: 0.45, blue: 0.9, alpha: 1.0)
+         timerLabel.textAlignment = .center
+         timerLabel.translatesAutoresizingMaskIntoConstraints = false
+         cardView.addSubview(timerLabel)
+ 
+-        // Amount Label
+-        amountLabel.text = "0 đ"
+-        amountLabel.font = UIFont.systemFont(ofSize: 28, weight: .bold)
+-        amountLabel.textColor = UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0)
+-        amountLabel.textAlignment = .center
+-        amountLabel.translatesAutoresizingMaskIntoConstraints = false
+-        cardView.addSubview(amountLabel)
+-
+-        // Separator Line
+-        let sepLine = UIView()
+-        sepLine.backgroundColor = UIColor(white: 0.90, alpha: 1.0)
+-        sepLine.translatesAutoresizingMaskIntoConstraints = false
+-        cardView.addSubview(sepLine)
+-
+-        // Info StackView
+         infoStackView.axis = .vertical
+-        infoStackView.spacing = 8
++        infoStackView.spacing = 12
+         infoStackView.alignment = .fill
+         infoStackView.distribution = .fill
+         infoStackView.translatesAutoresizingMaskIntoConstraints = false
+         cardView.addSubview(infoStackView)
+ 
+         NSLayoutConstraint.activate([
+-            cardView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 12),
++            cardView.topAnchor.constraint(equalTo: navView.bottomAnchor, constant: 12),
+             cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+             cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+-
+-            headerLogoLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 16),
++            headerLogoLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 18),
+             headerLogoLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+             headerLogoLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+-
+-            qrImageView.topAnchor.constraint(equalTo: headerLogoLabel.bottomAnchor, constant: 16),
+-            qrImageView.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
+-            qrImageView.widthAnchor.constraint(equalTo: cardView.widthAnchor, multiplier: 0.72),
+-            qrImageView.heightAnchor.constraint(equalTo: qrImageView.widthAnchor),
+-
+-            timerLabel.topAnchor.constraint(equalTo: qrImageView.bottomAnchor, constant: 12),
++            timerLabel.topAnchor.constraint(equalTo: headerLogoLabel.bottomAnchor, constant: 10),
+             timerLabel.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
+-
+-            amountLabel.topAnchor.constraint(equalTo: timerLabel.bottomAnchor, constant: 8),
+-            amountLabel.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
+-
+-            sepLine.topAnchor.constraint(equalTo: amountLabel.bottomAnchor, constant: 16),
+-            sepLine.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
+-            sepLine.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
+-            sepLine.heightAnchor.constraint(equalToConstant: 1),
+-
+-            infoStackView.topAnchor.constraint(equalTo: sepLine.bottomAnchor, constant: 16),
++            infoStackView.topAnchor.constraint(equalTo: timerLabel.bottomAnchor, constant: 18),
+             infoStackView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
+             infoStackView.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
+-            infoStackView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -20)
++            infoStackView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -18)
+         ])
+ 
+-        // Open Bank App Button
+-        openBankButton.setTitle("Mở App Ngân Hàng Thanh Toán Nhanh 🏦", for: .normal)
+-        openBankButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .bold)
+-        openBankButton.setTitleColor(.white, for: .normal)
+-        openBankButton.backgroundColor = UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 1.0)
+-        openBankButton.layer.cornerRadius = 12
+-        openBankButton.addTarget(self, action: #selector(openBankAppTapped), for: .touchUpInside)
+-        openBankButton.addGestureRecognizer(
+-            UILongPressGestureRecognizer(target: self, action: #selector(openBankAppLongPressed(_:))))
+-        openBankButton.translatesAutoresizingMaskIntoConstraints = false
+-        contentView.addSubview(openBankButton)
+-
+-        // Share & Save Buttons
+-        let secondaryStack = UIStackView()
+-        secondaryStack.axis = .horizontal
+-        secondaryStack.spacing = 12
+-        secondaryStack.distribution = .fillEqually
+-        secondaryStack.translatesAutoresizingMaskIntoConstraints = false
+-        contentView.addSubview(secondaryStack)
+-
+-        shareButton.setTitle("  Chia sẻ", for: .normal)
+-        if #available(iOS 13.0, *) {
+-            shareButton.setImage(UIImage(systemName: "square.and.arrow.up"), for: .normal)
+-        }
+-        shareButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+-        shareButton.setTitleColor(UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0), for: .normal)
+-        shareButton.layer.borderWidth = 1
+-        shareButton.layer.borderColor = UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0).cgColor
+-        shareButton.layer.cornerRadius = 10
+-        shareButton.addTarget(self, action: #selector(shareQRTapped), for: .touchUpInside)
+-
+-        saveButton.setTitle("  Lưu QR", for: .normal)
+-        if #available(iOS 13.0, *) {
+-            saveButton.setImage(UIImage(systemName: "square.and.arrow.down"), for: .normal)
+-        }
+-        saveButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+-        saveButton.setTitleColor(UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0), for: .normal)
+-        saveButton.layer.borderWidth = 1
+-        saveButton.layer.borderColor = UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0).cgColor
+-        saveButton.layer.cornerRadius = 10
+-        saveButton.addTarget(self, action: #selector(saveQRTapped), for: .touchUpInside)
+-
+-        secondaryStack.addArrangedSubview(shareButton)
+-        secondaryStack.addArrangedSubview(saveButton)
+-
+-        // Close / Back Button
+-        backButton.setTitle("Hoàn tất / Về danh sách đơn ↩️", for: .normal)
++        bankSectionLabel.text = "Chọn ngân hàng để mở màn chuyển tiền"
++        bankSectionLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
++        bankSectionLabel.textColor = .label
++        bankSectionLabel.numberOfLines = 0
++        bankSectionLabel.translatesAutoresizingMaskIntoConstraints = false
++        contentView.addSubview(bankSectionLabel)
++
++        bankGridStackView.axis = .vertical
++        bankGridStackView.spacing = 10
++        bankGridStackView.alignment = .fill
++        bankGridStackView.distribution = .fill
++        bankGridStackView.translatesAutoresizingMaskIntoConstraints = false
++        contentView.addSubview(bankGridStackView)
++
++        backButton.setTitle("Hoàn tất / Về danh sách đơn", for: .normal)
+         backButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+         backButton.setTitleColor(.secondaryLabel, for: .normal)
+         backButton.backgroundColor = UIColor(white: 0.92, alpha: 1.0)
+@@ -963,17 +793,13 @@ public class HNFastQRPaymentViewController: UIViewController {
+         contentView.addSubview(backButton)
+ 
+         NSLayoutConstraint.activate([
+-            openBankButton.topAnchor.constraint(equalTo: cardView.bottomAnchor, constant: 16),
+-            openBankButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+-            openBankButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+-            openBankButton.heightAnchor.constraint(equalToConstant: 50),
+-
+-            secondaryStack.topAnchor.constraint(equalTo: openBankButton.bottomAnchor, constant: 12),
+-            secondaryStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+-            secondaryStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+-            secondaryStack.heightAnchor.constraint(equalToConstant: 44),
+-
+-            backButton.topAnchor.constraint(equalTo: secondaryStack.bottomAnchor, constant: 12),
++            bankSectionLabel.topAnchor.constraint(equalTo: cardView.bottomAnchor, constant: 20),
++            bankSectionLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
++            bankSectionLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
++            bankGridStackView.topAnchor.constraint(equalTo: bankSectionLabel.bottomAnchor, constant: 10),
++            bankGridStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
++            bankGridStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
++            backButton.topAnchor.constraint(equalTo: bankGridStackView.bottomAnchor, constant: 18),
+             backButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+             backButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+             backButton.heightAnchor.constraint(equalToConstant: 46),
+@@ -982,191 +808,114 @@ public class HNFastQRPaymentViewController: UIViewController {
+     }
+ 
+     private func populateData() {
+-        renderCurrentSegment()
+-    }
+-
+-    @objc private func segmentChanged() {
+-        renderCurrentSegment()
+-    }
+-
+-    private func renderCurrentSegment() {
+-        infoStackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
+-
+-        let parsedMoney = HNVietQRBuilder.parseVND(amountText)
+-        let moneyVal = parsedMoney > 0 ? parsedMoney : (payData?.totalMoney ?? 0)
+-
+-        let numFormatter = NumberFormatter()
+-        numFormatter.numberStyle = .decimal
+-        let formattedAmount = numFormatter.string(from: NSNumber(value: moneyVal)) ?? "\(moneyVal)"
+-        amountLabel.text = "\(formattedAmount) đ"
+-
+-        if segmentedControl.selectedSegmentIndex == 0 {
+-            // Mode 0: J&T QR Pay
+-            headerLogoLabel.text = "J&T EXPRESS  |  Vietcombank  |  napas247  |  VietQR"
+-            currentPayload = payData?.payload ?? ""
+-
+-            if let qrImg = generateQRCode(from: currentPayload) {
+-                qrImageView.image = qrImg
+-            }
+-
+-            addInfoRow(label: "Số tài khoản (J&T)", value: payData?.customerCode.isEmpty == false ? payData!.customerCode : "Tài khoản ảo J&T")
+-            addInfoRow(label: "Nội dung", value: "TT CUOC VAN CHUYEN")
+-            addInfoRow(label: "Mã đơn hàng", value: waybillNo.isEmpty ? "---" : waybillNo)
+-
+-            timerLabel.isHidden = false
+-            let dateFormatter = DateFormatter()
+-            dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+-            if let data = payData, let exp = dateFormatter.date(from: data.expireTime) {
+-                expireDate = exp
+-            } else {
+-                expireDate = Date().addingTimeInterval(2.5 * 3600)
+-            }
++        guard let payload = payData?.payload, !payload.isEmpty else {
++            HNLog.write("[VietQR] Original J&T QR payload is missing.")
++            renderSummary()
++            showToast(message: "Không có payload QR J&T để đọc thông tin thu hộ.")
++            return
++        }
+ 
+-            // Parse the real EMVCo/VietQR payload so we can hand the bank app
+-            // the actual beneficiary account/bank/amount/content, instead of
+-            // just the raw opaque payload string.
+-            let parsed = EMVQRParser.extractVietQRInfo(from: currentPayload)
+-            let account = parsed.account ?? (payData?.customerCode.isEmpty == false ? payData!.customerCode : "")
+-            let amountFromQR = Int(parsed.amount ?? "") ?? moneyVal
+-            let content = parsed.content ?? "TT CUOC VAN CHUYEN \(waybillNo)"
+-            let resolvedBankBin = parsed.bin
+-            // tag 59 (merchant/beneficiary name) in J&T QR is "J&T EXPRESS";
+-            // override with the correct corporate beneficiary name.
+-            let rawBn = parsed.beneficiaryName ?? ""
+-            let beneficiaryName = (rawBn.isEmpty || rawBn.uppercased().contains("J&T")) ? "CTY TNHH MTV CPN THUAN PHONG-CN TAY NGUYEN" : rawBn
+-
+-            HNLog.write("""
+-            [VietQR] Mode 0 (J&T) parsed EMV payload:
+-              raw payload = \(currentPayload)
+-              parsed.bin = \(parsed.bin ?? "nil")
+-              parsed.account = \(parsed.account ?? "nil")
+-              parsed.amount = \(parsed.amount ?? "nil")
+-              parsed.content = \(parsed.content ?? "nil")
+-              parsed.beneficiaryName (tag 59) = \(parsed.beneficiaryName ?? "nil")
+-              => final account=\(account) amount=\(amountFromQR) content=\(content) bin=\(resolvedBankBin ?? "nil") bn=\(beneficiaryName)
+-            """)
+-
+-            if parsed.bin == nil || parsed.account == nil {
+-                HNLog.write("[VietQR] ⚠️ EMV parse FAILED to find tag 38 (bin/account) — payload format may not match expected napas247 TLV layout, or payload is empty/nil (check payData?.payload).")
+-            }
++        let parsed = EMVQRParser.extractVietQRInfo(from: payload)
++        guard let account = parsed.account,
++              !account.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
++              let bankBIN = parsed.bin,
++              !bankBIN.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
++              let amount = parsed.amount,
++              !amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
++              let content = parsed.content,
++              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
++            HNLog.write("[VietQR] Original payload is missing account, bank BIN, amount, or transfer content.")
++            renderSummary()
++            showToast(message: "Payload QR thiếu số tài khoản, ngân hàng, số tiền hoặc nội dung.")
++            return
++        }
+ 
+-            beneficiary = BeneficiaryInfo(
+-                account: account,
+-                bankCode: resolvedBankBin,
+-                bankLabel: "VietQR (napas247)",
+-                amount: amountFromQR,
+-                content: content,
+-                beneficiaryName: beneficiaryName
+-            )
++        let parsedName = parsed.beneficiaryName ?? ""
++        let name = parsedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "J&T EXPRESS" : parsedName
++        beneficiary = BeneficiaryInfo(
++            account: account,
++            bankBIN: bankBIN,
++            amount: amount,
++            content: content,
++            beneficiaryName: name
++        )
+ 
++        let dateFormatter = DateFormatter()
++        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
++        if let data = payData, let expiry = dateFormatter.date(from: data.expireTime) {
++            expireDate = expiry
+         } else {
+-            // Mode 1: Shipper Personal STK QR
+-            // Tiền chuyển khoản vào tài khoản shipper được làm tròn nghìn (từ 400đ lên)
+-            let shipperAmount = HNVietQRBuilder.roundVND(moneyVal)
+-            amountLabel.text = "\(numFormatter.string(from: NSNumber(value: shipperAmount)) ?? "\(shipperAmount)") đ"
+-            let bankName = HNBankConfig.bankName.isEmpty ? "BIDV" : HNBankConfig.bankName
+-            let accNumber = HNBankConfig.accountNumber.isEmpty ? "0962296321" : HNBankConfig.accountNumber
+-            let accName = HNBankConfig.accountName.isEmpty ? "NGUYEN VAN HAU" : HNBankConfig.accountName
+-
+-            headerLogoLabel.text = "\(bankName.uppercased())  |  STK: \(accNumber)  |  VietQR"
+-
+-            let noteText = "\(waybillNo) \(receiverName)".trimmingCharacters(in: .whitespacesAndNewlines)
+-            let contentText = noteText.isEmpty ? waybillNo : noteText
+-
+-            currentPayload = "STK: \(accNumber)\nChủ TK: \(accName)\nNgân hàng: \(bankName)\nSố tiền: \(shipperAmount) đ\nNội dung: \(waybillNo)"
+-
+-            let qrURLStr = "https://img.vietqr.io/image/\(bankName.lowercased())-\(accNumber)-compact2.png?amount=\(shipperAmount)&addInfo=\(contentText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&accountName=\(accName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+-
+-            if let ownBin = HNVietQRBuilder.bin(forBankName: bankName), !accNumber.isEmpty {
+-                // QR tự dựng trên máy (napas247): số tiền ghi đúng từng đồng, không qua mạng
+-                let emv = HNVietQRBuilder.payload(bin: ownBin, account: accNumber, amount: shipperAmount, content: contentText)
+-                currentPayload = emv
+-                qrImageView.image = generateQRCode(from: emv)
+-                HNLog.write("[VietQR] Mode 1 local QR bin=\(ownBin) amount=\(shipperAmount) payload=\(emv)")
+-            } else if let url = URL(string: qrURLStr) {
+-                URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+-                    if let data = data, let img = UIImage(data: data) {
+-                        DispatchQueue.main.async {
+-                            self?.qrImageView.image = img
+-                        }
+-                    }
+-                }.resume()
+-            }
+-
+-            addInfoRow(label: "Số tài khoản (Shipper)", value: "\(accNumber) (\(bankName))")
+-            addInfoRow(label: "Chủ tài khoản", value: accName)
+-            addInfoRow(label: "Nội dung ghi chú", value: contentText)
+-
+-            timerLabel.isHidden = true
+-
+-            let resolvedBin = HNVietQRBuilder.bin(forBankName: bankName) ?? VietQRBankDirectory.shared.binOrCode(forNameGuess: bankName)
+-
+-            HNLog.write("[VietQR] Mode 1 (Shipper) bankName=\(bankName) account=\(accNumber) resolvedBin=\(resolvedBin) amount=\(shipperAmount) content=\(contentText) bn=\(accName)")
+-
+-            beneficiary = BeneficiaryInfo(
+-                account: accNumber,
+-                bankCode: resolvedBin,
+-                bankLabel: bankName,
+-                amount: shipperAmount,
+-                content: contentText,
+-                beneficiaryName: accName
+-            )
++            expireDate = Date().addingTimeInterval(2.5 * 3600)
+         }
++        renderSummary()
++        HNLog.write("[VietQR] Parsed original J&T payload: BIN=\(bankBIN), account=\(account), amount=\(amount), content=\(content)")
+     }
+ 
+-    private func addInfoRow(label: String, value: String) {
+-        let rowView = UIView()
+-        rowView.translatesAutoresizingMaskIntoConstraints = false
+-
+-        let titleLbl = UILabel()
+-        titleLbl.text = label
+-        titleLbl.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+-        titleLbl.textColor = .secondaryLabel
+-        titleLbl.translatesAutoresizingMaskIntoConstraints = false
+-
+-        let valLbl = UILabel()
+-        valLbl.text = value
+-        valLbl.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+-        valLbl.textColor = .label
+-        valLbl.textAlignment = .right
+-        valLbl.numberOfLines = 2
+-        valLbl.translatesAutoresizingMaskIntoConstraints = false
++    private func renderSummary() {
++        infoStackView.arrangedSubviews.forEach {
++            infoStackView.removeArrangedSubview($0)
++            $0.removeFromSuperview()
++        }
++        let info = beneficiary
++        infoStackView.addArrangedSubview(copyableRow(label: "Tài khoản thu hộ", value: info?.account ?? ""))
++        infoStackView.addArrangedSubview(copyableRow(label: "Số tiền", value: info?.amount ?? ""))
++        infoStackView.addArrangedSubview(copyableRow(label: "Nội dung", value: info?.content ?? ""))
++    }
+ 
+-        rowView.addSubview(titleLbl)
+-        rowView.addSubview(valLbl)
++    private func copyableRow(label: String, value: String) -> UIView {
++        let row = UIStackView()
++        row.axis = .horizontal
++        row.spacing = 8
++        row.alignment = .center
++        row.distribution = .fill
+ 
+-        NSLayoutConstraint.activate([
+-            titleLbl.leadingAnchor.constraint(equalTo: rowView.leadingAnchor),
+-            titleLbl.topAnchor.constraint(equalTo: rowView.topAnchor),
+-            titleLbl.bottomAnchor.constraint(equalTo: rowView.bottomAnchor),
+-
+-            valLbl.trailingAnchor.constraint(equalTo: rowView.trailingAnchor),
+-            valLbl.topAnchor.constraint(equalTo: rowView.topAnchor),
+-            valLbl.bottomAnchor.constraint(equalTo: rowView.bottomAnchor),
+-            valLbl.leadingAnchor.constraint(greaterThanOrEqualTo: titleLbl.trailingAnchor, constant: 8)
+-        ])
++        let details = UIStackView()
++        details.axis = .vertical
++        details.spacing = 4
++        details.alignment = .fill
+ 
+-        infoStackView.addArrangedSubview(rowView)
++        let titleLabel = UILabel()
++        titleLabel.text = label
++        titleLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
++        titleLabel.textColor = .secondaryLabel
++
++        let valueLabel = UILabel()
++        valueLabel.text = value.isEmpty ? "Chưa có dữ liệu" : value
++        valueLabel.font = UIFont.systemFont(ofSize: 15, weight: .medium)
++        valueLabel.textColor = .label
++        valueLabel.numberOfLines = 0
++        valueLabel.lineBreakMode = .byCharWrapping
++
++        details.addArrangedSubview(titleLabel)
++        details.addArrangedSubview(valueLabel)
++
++        let copyButton = UIButton(type: .system)
++        copyButton.setTitle("Sao chép", for: .normal)
++        copyButton.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
++        copyButton.accessibilityValue = value
++        copyButton.addTarget(self, action: #selector(copySummaryValue(_:)), for: .touchUpInside)
++
++        row.addArrangedSubview(details)
++        row.addArrangedSubview(copyButton)
++        details.setContentHuggingPriority(.defaultLow, for: .horizontal)
++        copyButton.setContentHuggingPriority(.required, for: .horizontal)
++        return row
+     }
+ 
+-    private func generateQRCode(from string: String) -> UIImage? {
+-        let data = string.data(using: .utf8)
+-        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+-        filter.setValue(data, forKey: "inputMessage")
+-        filter.setValue("M", forKey: "inputCorrectionLevel")
+-        guard let ciImage = filter.outputImage else { return nil }
+-
+-        let transform = CGAffineTransform(scaleX: 10, y: 10)
+-        let scaledImage = ciImage.transformed(by: transform)
+-
+-        let context = CIContext()
+-        if let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) {
+-            return UIImage(cgImage: cgImage)
++    @objc private func copySummaryValue(_ sender: UIButton) {
++        guard let value = sender.accessibilityValue, !value.isEmpty else {
++            showToast(message: "Không có thông tin để sao chép.")
++            return
+         }
+-        return UIImage(ciImage: scaledImage)
++        UIPasteboard.general.string = value
++        showToast(message: "Đã sao chép thông tin.")
+     }
+ 
+     private func startCountdown() {
++        guard expireDate != nil else {
++            timerLabel.isHidden = true
++            return
++        }
+         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+             self?.updateTimerLabel()
+         }
+@@ -1174,261 +923,154 @@ public class HNFastQRPaymentViewController: UIViewController {
+     }
+ 
+     private func updateTimerLabel() {
+-        guard let exp = expireDate else { return }
+-        let diff = Int(exp.timeIntervalSinceNow)
+-        if diff <= 0 {
++        guard let expiry = expireDate else { return }
++        let difference = Int(expiry.timeIntervalSinceNow)
++        if difference <= 0 {
+             timerLabel.text = "Hết hiệu lực"
+             timerLabel.textColor = .systemRed
+             countdownTimer?.invalidate()
+             return
+         }
+-
+-        let hours = diff / 3600
+-        let minutes = (diff % 3600) / 60
+-        let seconds = diff % 60
++        let hours = difference / 3600
++        let minutes = (difference % 3600) / 60
++        let seconds = difference % 60
+         timerLabel.text = String(format: "Hiệu lực trong %02d:%02d:%02d", hours, minutes, seconds)
+     }
+ 
+-    /// Directory apps + Vikki (not in the official list, so added locally).
+-    private func allApps() -> [VietQRApp] {
+-        var apps = VietQRBankDirectory.shared.apps
+-        if !apps.contains(where: { $0.appId.lowercased() == "vikki" }) {
+-            apps.append(VietQRApp(appId: "vikki", appLogo: nil, appName: "Vikki Digital Bank",
+-                                  bankName: "Vikki", monthlyInstall: nil, deeplink: nil, autofill: 0))
+-        }
+-        return apps
+-    }
+-
+-    private func lastUsedApp() -> VietQRApp? {
+-        guard let id = UserDefaults.standard.string(forKey: HNQRPrefs.lastBankKey) else { return nil }
+-        return allApps().first(where: { $0.appId.caseInsensitiveCompare(id) == .orderedSame })
+-    }
+-
+-    @objc private func openBankAppTapped() {
+-        VietQRBankDirectory.shared.ensureLoaded {}      // refresh cache in background, never blocks the tap
+-        if let app = lastUsedApp() {
+-            openBank(app)                               // one tap: straight into the last bank used
+-        } else {
+-            presentBankChoiceSheet()
+-        }
+-    }
+-
+-    @objc private func openBankAppLongPressed(_ g: UILongPressGestureRecognizer) {
+-        guard g.state == .began else { return }
+-        presentBankChoiceSheet()                        // long-press to pick a different bank
+-    }
+-
+-    private func directCustomURL(for app: VietQRApp, account: String, bin: String, amount: Int, content: String, name: String) -> URL? {
+-        let appIdLower = app.appId.lowercased()
+-        let route: String
+-        if let override = HNBankSchemeOverrides.schemes[appIdLower] {
+-            route = override
+-        } else {
+-            switch appIdLower {
+-            case "bidv":
+-                route = "bidvsmartbanking://x-callback-url/vietqr"
+-            case "mb":
+-                route = "mbcustom://vietqr"
+-            case "vcb":
+-                route = "vietcombank://vietqr"
+-            case "icb":
+-                route = "vietinbankipay://vietqr"
+-            case "tcb":
+-                route = "techcombank://vietqr"
+-            case "acb", "acb-biz":
+-                route = "acb://vietqr"
+-            case "vpb", "cake":
+-                route = "vpbankneo://vietqr"
+-            case "vib-2":
+-                route = "myvib://vietqr"
+-            case "tpb":
+-                route = "tpbank://vietqr"
+-            case "shb", "shbvn":
+-                route = "shb://vietqr"
+-            case "ocb":
+-                route = "ocb://vietqr"
+-            case "lpb":
+-                route = "lpbank://vietqr"
+-            case "hdb":
+-                route = "hdbank://vietqr"
+-            case "vba":
+-                route = "agribank://vietqr"
+-            case "stb":
+-                route = "sacombankpay://vietqr"
+-            default:
+-                route = "\(appIdLower)://vietqr"
+-            }
++    private func renderBankButtons() {
++        bankGridStackView.arrangedSubviews.forEach {
++            bankGridStackView.removeArrangedSubview($0)
++            $0.removeFromSuperview()
+         }
+ 
+-        guard var components = URLComponents(string: route) else { return nil }
+-        components.queryItems = [
+-            URLQueryItem(name: "ba", value: "\(account)@\(bin)"),
+-            URLQueryItem(name: "am", value: String(amount)),
+-            URLQueryItem(name: "tn", value: content),
+-            URLQueryItem(name: "bn", value: name)
+-        ]
+-        return components.url
+-    }
+-
+-    /// Official VietQR universal link:
+-    /// https://dl.vietqr.io/pay?app=&ba=<account>@<bank CODE>&am=&tn=&bn=&url=
+-    private func officialDeepLink(appId: String, _ b: BeneficiaryInfo) -> URL? {
+-        guard let ref = HNVietQRBankCodes.deepLinkRef(for: b.bankCode),
+-              var components = URLComponents(string: "https://dl.vietqr.io/pay") else {
+-            HNLog.write("[VietQR] Cannot build official deeplink: beneficiary bank code is missing or unknown.")
+-            return nil
+-        }
+-        components.queryItems = [
+-            URLQueryItem(name: "app", value: appId),
+-            URLQueryItem(name: "ba", value: "\(b.account)@\(ref)"),
+-            URLQueryItem(name: "am", value: String(b.amount)),
+-            URLQueryItem(name: "tn", value: b.content),
+-            URLQueryItem(name: "bn", value: b.beneficiaryName),
+-            URLQueryItem(name: "url", value: HNVietQRBankCodes.defaultReturnURL)
+-        ]
+-        return components.url
+-    }
+-
+-    /// Opens the chosen banking app.
+-    ///  1. Apps in the official vietqr.io list -> dl.vietqr.io universal link
+-    ///     (autofill for icb/bidv/ocb/acb/mb, otherwise it just opens the app).
+-    ///  2. Everything else (e.g. Vikki) -> custom URL scheme (see HNBankSchemeOverrides).
+-    private func openBank(_ app: VietQRApp) {
+-        HNLog.write("[VietQR] ===== openBank tapped ===== appId=\(app.appId) appName=\(app.appName)")
+-        UserDefaults.standard.set(app.appId, forKey: HNQRPrefs.lastBankKey)
+-
+-        // Copy raw payload and save QR image so "scan from photo" is always available as a fallback
+-        UIPasteboard.general.string = currentPayload
+-        if let qrImage = qrImageView.image {
+-            UIImageWriteToSavedPhotosAlbum(qrImage, nil, nil, nil)
++        bankApps = VietQRBankDirectory.shared.apps.filter { $0.autofill == 1 }
++        let lastUsedID = UserDefaults.standard.string(forKey: HNQRPrefs.lastBankKey)
++        if let lastIndex = bankApps.firstIndex(where: { $0.appId.caseInsensitiveCompare(lastUsedID ?? "") == .orderedSame }) {
++            let lastUsedApp = bankApps.remove(at: lastIndex)
++            bankApps.insert(lastUsedApp, at: 0)
+         }
+ 
+-        guard let b = beneficiary, !b.account.isEmpty else {
+-            HNLog.write("[VietQR] ❌ beneficiary nil or empty account. Opening app only.")
+-            openAppOnly(appId: app.appId)
++        guard !bankApps.isEmpty else {
++            let emptyLabel = UILabel()
++            emptyLabel.text = "Không có ứng dụng ngân hàng hỗ trợ tự điền."
++            emptyLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
++            emptyLabel.textColor = .secondaryLabel
++            emptyLabel.textAlignment = .center
++            emptyLabel.numberOfLines = 0
++            bankGridStackView.addArrangedSubview(emptyLabel)
+             return
+         }
+ 
+-        if HNVietQRBankCodes.officialDeepLinkApps.contains(app.appId.lowercased()) {
+-            guard let url = officialDeepLink(appId: app.appId, b) else {
+-                HNLog.write("[VietQR] Falling back to app-only link because beneficiary bank code could not be resolved.")
+-                openAppOnly(appId: app.appId)
+-                return
+-            }
+-            HNLog.write("[VietQR] ➡️ Official deeplink = \(url.absoluteString)")
+-            showToast(
+-                message: "Đang mở app ngân hàng... Nếu không tự điền, chọn Quét mã bằng ảnh QR vừa được lưu vào máy",
+-                duration: 3.5
+-            )
+-            UIApplication.shared.open(url, options: [:]) { [weak self] success in
+-                HNLog.write("[VietQR] Official deeplink open completion: success=\(success)")
+-                if !success { self?.openCustomScheme(app, b) }
++        for index in stride(from: 0, to: bankApps.count, by: 2) {
++            let row = UIStackView()
++            row.axis = .horizontal
++            row.spacing = 10
++            row.alignment = .fill
++            row.distribution = .fillEqually
++            row.addArrangedSubview(bankButton(for: bankApps[index], lastUsedID: lastUsedID))
++            if index + 1 < bankApps.count {
++                row.addArrangedSubview(bankButton(for: bankApps[index + 1], lastUsedID: lastUsedID))
++            } else {
++                row.addArrangedSubview(UIView())
+             }
+-            return
++            bankGridStackView.addArrangedSubview(row)
+         }
+-        openCustomScheme(app, b)
+     }
+ 
+-    private func openCustomScheme(_ app: VietQRApp, _ b: BeneficiaryInfo) {
+-        let appIdLower = app.appId.lowercased()
+-        if appIdLower == "vikki", HNBankSchemeOverrides.schemes["vikki"] == nil {
+-            showToast(
+-                message: "Chưa cấu hình URL scheme của Vikki. QR đã lưu vào Ảnh: mở Vikki → Quét QR → Chọn ảnh QR",
+-                duration: 4.0
+-            )
+-            return
++    private func bankButton(for app: VietQRApp, lastUsedID: String?) -> UIButton {
++        let button = UIButton(type: .system)
++        button.setTitle(app.appName, for: .normal)
++        button.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
++        button.titleLabel?.numberOfLines = 2
++        button.titleLabel?.textAlignment = .center
++        button.setTitleColor(.label, for: .normal)
++        let isLastUsed = app.appId.caseInsensitiveCompare(lastUsedID ?? "") == .orderedSame
++        button.backgroundColor = isLastUsed ? UIColor(red: 1.0, green: 0.91, blue: 0.88, alpha: 1.0) : .white
++        button.layer.cornerRadius = 12
++        button.layer.borderWidth = isLastUsed ? 2 : 1
++        if isLastUsed {
++            button.layer.borderColor = UIColor(red: 0.90, green: 0.22, blue: 0.21, alpha: 1.0).cgColor
++        } else {
++            button.layer.borderColor = UIColor(white: 0.86, alpha: 1.0).cgColor
+         }
++        button.heightAnchor.constraint(equalToConstant: 58).isActive = true
++        button.accessibilityIdentifier = app.appId
++        button.addTarget(self, action: #selector(bankButtonTapped(_:)), for: .touchUpInside)
++        return button
++    }
+ 
+-        let binOrCode = b.bankCode ?? VietQRBankDirectory.shared.binOrCode(forNameGuess: b.bankLabel)
+-        guard let directURL = directCustomURL(for: app, account: b.account, bin: binOrCode,
+-                                              amount: b.amount, content: b.content, name: b.beneficiaryName) else {
+-            openAppOnly(appId: app.appId)
++    @objc private func bankButtonTapped(_ sender: UIButton) {
++        guard let appID = sender.accessibilityIdentifier,
++              let app = bankApps.first(where: { $0.appId.caseInsensitiveCompare(appID) == .orderedSame }) else {
++            HNLog.write("[VietQR] Could not resolve tapped bank app button.")
++            showToast(message: "Không xác định được ứng dụng ngân hàng.")
+             return
+         }
+-
+-        HNLog.write("[VietQR] ➡️ Opening custom scheme = \(directURL.absoluteString)")
+-        showToast(
+-            message: "Đang mở app ngân hàng... Nếu ứng dụng không tự điền, vui lòng chọn Quét mã bằng ảnh QR đơn hàng vừa được tự động lưu vào máy",
+-            duration: 3.5
+-        )
+-        UIApplication.shared.open(directURL, options: [:]) { [weak self] success in
+-            HNLog.write("[VietQR] Custom scheme open completion: success=\(success)")
+-            if !success { self?.openAppOnly(appId: app.appId) }
+-        }
++        openBank(app)
+     }
+ 
+-    /// Fallback: official universal link (full params when available, bare app link otherwise)
+-    private func openAppOnly(appId: String) {
+-        let url: URL?
+-        if let b = beneficiary, !b.account.isEmpty {
+-            url = officialDeepLink(appId: appId, b) ?? URL(string: "https://dl.vietqr.io/pay?app=\(appId)")
+-        } else {
+-            url = URL(string: "https://dl.vietqr.io/pay?app=\(appId)")
+-        }
+-        guard let u = url else { return }
+-        HNLog.write("[VietQR] Web fallback link = \(u.absoluteString)")
+-        UIApplication.shared.open(u, options: [:], completionHandler: nil)
++    private func percentEncode(_ value: String) -> String? {
++        let allowedCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
++        return value.addingPercentEncoding(withAllowedCharacters: allowedCharacters)
+     }
+ 
+-    private func presentBankChoiceSheet() {
+-        let sheet = UIAlertController(title: "Chọn App Ngân Hàng Thanh Toán", message: "Đã sao chép QR vào bộ nhớ tạm · Lần sau chạm 1 lần, nhấn giữ nút để đổi app", preferredStyle: .actionSheet)
+-
+-        let configuredBank = HNBankConfig.bankName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+-        var apps = allApps()
+-
+-        var hasDefault = false
+-        if !configuredBank.isEmpty,
+-           let idx = apps.firstIndex(where: {
+-               $0.appId.lowercased().contains(configuredBank) ||
+-               $0.appName.lowercased().contains(configuredBank) ||
+-               $0.bankName.lowercased().contains(configuredBank) ||
+-               configuredBank.contains($0.appId.lowercased())
+-           }) {
+-            let preferred = apps.remove(at: idx)
+-            apps.insert(preferred, at: 0)
+-            hasDefault = true
++    private func officialDeepLink(appID: String, info: BeneficiaryInfo) -> URL? {
++        guard let bankCode = HNVietQRBankCodes.deepLinkRef(for: info.bankBIN) else {
++            HNLog.write("[VietQR] Cannot resolve beneficiary BIN to a VietQR bank code: \(info.bankBIN)")
++            return nil
+         }
+-
+-        for (index, app) in apps.enumerated() {
+-            let name = app.displayShortName
+-            let autofillBadge = app.showsAutofillBadge ? " ⚡ Tự động điền" : ""
+-            let title = (index == 0 && hasDefault) ? "⭐ \(name) (Mặc định)\(autofillBadge)" : "\(name)\(autofillBadge)"
+-            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+-                self?.openBank(app)
+-            })
++        guard let encodedAppID = percentEncode(appID),
++              let encodedAccount = percentEncode(info.account),
++              let encodedBankCode = percentEncode(bankCode),
++              let encodedAmount = percentEncode(info.amount),
++              let encodedContent = percentEncode(info.content),
++              let encodedName = percentEncode(info.beneficiaryName),
++              let encodedReturnURL = percentEncode(HNVietQRBankCodes.defaultReturnURL) else {
++            HNLog.write("[VietQR] Could not percent-encode one or more deeplink values.")
++            return nil
+         }
+ 
+-        sheet.addAction(UIAlertAction(title: "Đóng", style: .cancel))
+-
+-        if let popover = sheet.popoverPresentationController {
+-            popover.sourceView = openBankButton
+-            popover.sourceRect = openBankButton.bounds
++        let link = "https://dl.vietqr.io/pay?app=\(encodedAppID)&ba=\(encodedAccount)@\(encodedBankCode)&am=\(encodedAmount)&tn=\(encodedContent)&bn=\(encodedName)&url=\(encodedReturnURL)"
++        guard let url = URL(string: link) else {
++            HNLog.write("[VietQR] Could not create URL from official deeplink.")
++            return nil
+         }
+-
+-        present(sheet, animated: true)
++        return url
+     }
+ 
+-    @objc private func shareQRTapped() {
+-        guard let qrImg = qrImageView.image else { return }
+-        let text = "Mã QR Thanh Toán J&T - Đơn \(waybillNo) - Số tiền \(amountLabel.text ?? "")"
+-        let vc = UIActivityViewController(activityItems: [text, qrImg], applicationActivities: nil)
+-        if let popover = vc.popoverPresentationController {
+-            popover.sourceView = shareButton
+-            popover.sourceRect = shareButton.bounds
++    private func openBank(_ app: VietQRApp) {
++        guard let info = beneficiary else {
++            HNLog.write("[VietQR] Open blocked: required transfer details are missing from the original J&T payload.")
++            showToast(message: "Không mở ngân hàng vì payload QR thiếu thông tin thu hộ.")
++            return
++        }
++        guard let url = officialDeepLink(appID: app.appId, info: info) else {
++            showToast(message: "Không xác định được mã ngân hàng nhận từ payload QR.")
++            return
+         }
+-        present(vc, animated: true)
+-    }
+ 
+-    @objc private func saveQRTapped() {
+-        guard let qrImg = qrImageView.image else { return }
+-        UIImageWriteToSavedPhotosAlbum(qrImg, self, #selector(imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
+-    }
++        let now = Date()
++        if let previousOpen = UserDefaults.standard.object(forKey: HNQRPrefs.lastOpenDateKey) as? Date,
++           now.timeIntervalSince(previousOpen) < 2 {
++            showToast(message: "Vui lòng đợi ít nhất 2 giây trước khi mở ngân hàng tiếp theo.")
++            return
++        }
++        UserDefaults.standard.set(now, forKey: HNQRPrefs.lastOpenDateKey)
+ 
+-    @objc private func imageSaved(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeRawPointer) {
+-        if let error = error {
+-            showToast(message: "Không thể lưu ảnh: \(error.localizedDescription)")
+-        } else {
+-            showToast(message: "Đã lưu ảnh QR vào Thư Viện! 🖼️")
++        HNLog.write("[VietQR] Official deeplink = \(url.absoluteString)")
++        UIApplication.shared.open(url, options: [:]) { [weak self] success in
++            HNLog.write("[VietQR] UIApplication.open completion: appId=\(app.appId), success=\(success)")
++            if success {
++                UserDefaults.standard.set(app.appId, forKey: HNQRPrefs.lastBankKey)
++            }
++            guard let self = self else { return }
++            DispatchQueue.main.async {
++                if success {
++                    self.renderBankButtons()
++                } else {
++                    self.showToast(message: "Không mở được ứng dụng ngân hàng. Bạn vẫn có thể sao chép thông tin để nhập tay.")
++                }
++            }
+         }
+     }
+ 
+@@ -1451,8 +1093,8 @@ public class HNFastQRPaymentViewController: UIViewController {
+         toastLabel.clipsToBounds = true
+         toastLabel.translatesAutoresizingMaskIntoConstraints = false
+         toastLabel.numberOfLines = 0
+-
+         view.addSubview(toastLabel)
++
+         NSLayoutConstraint.activate([
+             toastLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+             toastLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+@@ -1467,4 +1109,4 @@ public class HNFastQRPaymentViewController: UIViewController {
+             toastLabel.removeFromSuperview()
+         }
+     }
+-}
+\ No newline at end of file
++}
